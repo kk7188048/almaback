@@ -73,7 +73,8 @@ def test_llm_rate_limit_is_retried_with_backoff_and_succeeds(world):
     assert len(attempts) == 1  # absorbed inside the call, no new attempt needed
 
 
-def test_llm_outage_retries_attempts_with_backoff_then_fails_cleanly(client, world):
+def test_llm_outage_retries_attempts_with_backoff_then_fails_cleanly(client, world, settings):
+    settings.max_attempts = 3
     created = world.submit_zip()
     provider = ScriptedProvider(lambda req, n: (_ for _ in ()).throw(LLMUnavailable("down")))
     deps = deps_with(provider)

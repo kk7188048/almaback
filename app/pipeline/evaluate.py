@@ -1,10 +1,6 @@
-"""LLM evaluation: prompt chain (not a free-roaming agent).
-
-  context pack -> understanding -> {architecture | code quality | documentation} in parallel
-               -> one structured scoring call PER rubric criterion (rubric is data from the DB)
-               -> self-consistency re-sampling when confidence is low / the score is borderline
-
-Aggregation into the final score is NOT done here (see aggregate.py)."""
+"""LLM evaluation: understanding, three parallel analyses, then one structured scoring call per rubric criterion,
+re-sampled when confidence is low. The final score is computed in aggregate.py, never by the model.
+"""
 
 import json
 import logging
@@ -115,7 +111,7 @@ class Evaluator:
         retrieved = self.retrieved.get(criterion["id"], [])
         validator = make_score_validator(criterion, self.known_paths)
         meta = {**self.meta_base}
-        return self._call(  # type: ignore[return-value]
+        return self._call(
             lambda ctx: prompts.criterion_request(self.boundary, ctx, criterion, understanding, analyses, retrieved, meta, temperature),
             CriterionScoreOut,
             validator,

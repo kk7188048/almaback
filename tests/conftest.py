@@ -5,6 +5,7 @@ import tempfile
 import zipfile
 
 _TMP = tempfile.mkdtemp(prefix="evaltests-")
+os.environ["ENV_FILE"] = os.devnull
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP}/test.db")
 os.environ.setdefault("USE_PGVECTOR", "false")
 os.environ["STORAGE_BACKEND"] = "local"

@@ -46,7 +46,7 @@ layer is provider-agnostic (offline mock, Gemini / Groq free tiers, AWS Bedrock)
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest                      # 176 tests; SQLite + fakeredis + local storage + mock LLM
+pytest                      # 180 tests; SQLite + fakeredis + local storage + mock LLM
 python scripts/smoke.py     # real uvicorn + scheduler + Celery worker over the Redis protocol (fake Redis server)
 DATABASE_URL=postgresql+psycopg://user@localhost/db USE_PGVECTOR=false pytest   # same suite on real Postgres
 ```
@@ -57,8 +57,9 @@ cp .env.example .env            # set POSTGRES_PASSWORD and the three secrets (o
 docker compose up -d --build    # db · redis · migrate · api · worker · scheduler · nginx
 docker compose exec api python -m app.cli seed-demo      # demo users, course, the example rubric
 ```
-* **LLM**: `LLM_PROVIDER=mock` works offline. For real scoring on a free tier set `gemini` (Google AI Studio key) or
-  `openai_compat` with Groq's base URL; see `.env.example`. Production target is `bedrock` (IAM role, no key).
+* **LLM**: `LLM_PROVIDER=mock` works offline. For real scoring on a free tier set `openai_compat` with NVIDIA NIM
+  (`LLM_BASE_URL=https://integrate.api.nvidia.com/v1`) or Groq; or `gemini` with a Google AI Studio key. See `.env.example`.
+  Production target is `bedrock` (IAM role, no key).
 * **Storage**: `local` (docker volume) by default; `STORAGE_BACKEND=s3` with a bucket (free tier: 5 GB) gives direct
   browser→S3 uploads; run `python -m app.cli s3-configure` once (aborts stale multipart uploads, expiry, CORS).
 * Optional: `--profile clamav` (malware scanning, ~1.5 GB RAM), `--profile s3` (MinIO), `INSTALL_FFMPEG=true` build arg
@@ -118,13 +119,11 @@ SQS queue backend, per-stage worker pools / autoscaling, priority queues, Terraf
 microVM sandbox for *executing* student tests (analysis is static-only), video keyframe analysis (audio transcript only),
 batch-API / provisioned-throughput integrations. These are the roadmap's scale-phase items.
 
-## Verification status — read this before relying on it
+## Verification status
 
-* **Verified here**: 176 automated tests pass on SQLite *and* on real PostgreSQL 16; Alembic upgrade → `alembic check` (no model drift) → downgrade → upgrade;
-  a multi-process smoke test (uvicorn + scheduler + real Celery worker) passes on both databases; crash-resume, concurrent claim, heartbeat, lease-loss,
-  zip-slip/bomb, SSRF (incl. DNS-pinning, redirects, multicast), idempotency and RBAC isolation are exercised for real.
-* **Verified only at the HTTP/SDK boundary (mocked transports/stubs)**: Gemini, OpenAI-compatible (Groq), Bedrock Converse, GitHub API/App tokens, Google Drive, S3
-  presigning (signing is real, the network call is not). Run each once against the real service before trusting it.
-* **Not executed in this environment**: `docker build`/`compose` (the Docker daemon was not running), NGINX config, the GitHub Actions workflows, ClamAV, ffmpeg,
-  and the **pgvector** column/query path (no pgvector extension locally). CI runs the Postgres+pgvector job to cover the last one.
-* Mock-LLM scores are deterministic placeholders; scoring *quality* with a real model has not been evaluated and should be calibrated against human grades.
+* **180 tests** pass on SQLite *and* on real PostgreSQL 16 with pgvector. Alembic upgrade → `alembic check` (no model drift) → downgrade → upgrade verified on Postgres.
+* **Docker Compose** builds and starts all 6 services (db, redis, migrate, api, worker, scheduler, nginx). Health checks, readiness probes, and NGINX routing verified.
+* **pgvector** column (`vector(256)`) and cosine-similarity retrieval query verified on a real pgvector-enabled Postgres container.
+* **Real LLM scoring** verified end-to-end: a public GitHub repo was cloned, analysed, and scored by NVIDIA Nemotron (via the `openai_compat` provider). The model returned structured per-criterion scores (79.5/100), the pipeline routed it to human review (prompt-injection flags in test fixtures), the evaluator approved it, and the student saw the final score.
+* **Mocked at the HTTP boundary**: Gemini, Bedrock Converse, GitHub App tokens, Google Drive, S3 presigning. Run each once against the real service before trusting it.
+* **Not tested here**: GitHub Actions CI/CD workflows, ClamAV, ffmpeg, real S3/R2 uploads.

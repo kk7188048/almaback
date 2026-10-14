@@ -1,8 +1,6 @@
-"""Chunking + embeddings + retrieval.
-
-The default embedder is a local, deterministic feature-hashing embedder: free, offline, no data leaves the box.
-It captures lexical similarity (identifiers, API names), which is what per-criterion evidence lookup needs.
-Swap `Embedder` for a hosted model (same interface) if semantic similarity becomes important."""
+"""Chunking, a local feature-hashing embedder (free, offline, lexical) and cosine similarity.
+Swap HashEmbedder for a hosted model if semantic similarity becomes important.
+"""
 
 import hashlib
 import math

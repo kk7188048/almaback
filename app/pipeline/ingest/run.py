@@ -1,9 +1,5 @@
-"""Fetch every submitted source into a work directory, applying the safety checks for each type.
-
-Failure policy:
-  * retryable error (network, rate limit)  -> raised, the attempt is retried (checkpoints keep LLM work)
-  * non-retryable error on one source      -> that source is marked failed; the others still get evaluated
-  * non-retryable errors on ALL sources    -> the job fails with the first error (student must fix the submission)
+"""Fetch every submitted source into a work directory. A permanent error on one source does not block the others;
+retryable errors fail the attempt; permanent errors on all sources fail the job.
 """
 
 import json

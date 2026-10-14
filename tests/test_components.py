@@ -16,7 +16,7 @@ from app.pipeline.evaluate import combine_samples, make_score_validator
 from app.pipeline.ingest import drive, github, live_url
 from app.pipeline.errors import SourceUnavailable, TransientIngestError
 from app.pipeline.llm.base import (
-    BudgetExceeded, CircuitBreaker, CircuitOpen, LLMAuthError, LLMClient, LLMMalformedResponse, LLMRateLimited, LLMRequest,
+    BudgetExceeded, CircuitBreaker, CircuitOpen, RequestPacer, LLMAuthError, LLMClient, LLMMalformedResponse, LLMRateLimited, LLMRequest,
     LLMResponse, LLMTimeout, LLMTokenLimit, LLMUnavailable, Provider, SemanticError, UsageTracker,
 )
 from app.pipeline.llm.providers import BedrockProvider, GeminiProvider, MockProvider, OpenAICompatProvider, build_provider
@@ -687,3 +687,36 @@ def test_embedding_retrieval_prefers_lexically_relevant_chunks():
     assert e.embed("same text") == e.embed("same text") and abs(sum(x * x for x in e.embed("some words here")) - 1) < 1e-9
     chunks = embeddings.chunk_text("f.py", "\n".join(f"line {i} " + "x" * 40 for i in range(200)), max_chars=500)
     assert len(chunks) > 5 and all(len(c.text) <= 500 for c in chunks) and chunks[0].ref.startswith("f.py:1-")
+
+
+def test_rate_limits_never_open_the_circuit_breaker_but_outages_do():
+    s = get_settings().model_copy(update={"llm_breaker_threshold": 2, "llm_max_retries": 6})
+    throttled = FlakyProvider([LLMRateLimited(retry_after=0)] * 5 + [{"score": 1, "justification": "j", "evidence": [], "confidence": 0.5}])
+    c = LLMClient(throttled, s, UsageTracker(s, 10**6), sleep=lambda _: None, rng=lambda: 0.0)
+    assert c.call(REQ, CriterionScoreOut).score == 1 and throttled.calls == 6  # 5 throttles, none counted as outages
+
+
+def test_request_pacer_spaces_calls_to_the_provider_quota():
+    now = [0.0]
+    slept: list[float] = []
+
+    def sleep(d):
+        slept.append(d)
+        now[0] += d
+
+    pacer = RequestPacer(requests_per_minute=12, clock=lambda: now[0], sleep=sleep)  # one call every 5 s
+    for _ in range(4):
+        pacer.wait()
+    assert slept == [5.0, 5.0, 5.0] and now[0] == 15.0
+    now[0] += 60
+    pacer.wait()
+    assert slept[-1] == 5.0 or len(slept) == 3  # an idle gap resets the schedule: no wait owed
+    RequestPacer(0).wait()
+
+
+def test_google_retry_delay_is_read_from_the_error_body():
+    body = {"error": {"code": 429, "details": [{"@type": "x", "retryDelay": "17s"}]}}
+    transport = httpx.MockTransport(lambda r: httpx.Response(429, json=body))
+    with pytest.raises(LLMRateLimited) as info:
+        GeminiProvider(settings_for(), transport=transport).complete(REQ)
+    assert info.value.retry_after == 17.0

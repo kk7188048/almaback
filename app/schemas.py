@@ -112,7 +112,6 @@ class JobOut(BaseModel):
     result_url: str | None = None
 
 
-# ---- admin / course management ----
 class UserCreateIn(BaseModel):
     email: EmailStr
     name: str = Field(default="", max_length=255)

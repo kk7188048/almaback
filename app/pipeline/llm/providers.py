@@ -1,9 +1,5 @@
-"""Concrete providers. All return parsed JSON; none of them are given tools (the grader can only emit data).
-
-mock           deterministic, offline - default; lets the whole pipeline run with zero accounts or cost
-gemini         Google Gemini REST API (free tier available)
-openai_compat  any OpenAI-compatible /chat/completions endpoint (Groq free tier, OpenRouter, vLLM, ...)
-bedrock        AWS Bedrock Converse API; structured output via a forced tool call (the production target)
+"""LLM providers: mock (offline, deterministic), gemini, openai_compat (NVIDIA, Groq, OpenRouter), bedrock.
+None of them is given tools: the model can only return data.
 """
 
 import hashlib
@@ -17,6 +13,9 @@ from app.pipeline.llm.base import (
     LLMAuthError, LLMMalformedResponse, LLMRateLimited, LLMRequest, LLMResponse, LLMTimeout, LLMTokenLimit,
     LLMUnavailable, Provider,
 )
+
+
+OUTPUT_HEADROOM = 8192  # reasoning models spend the output budget thinking before they answer; only tokens used are billed
 
 
 def _tokens(*texts: str) -> int:
@@ -41,7 +40,14 @@ def _retry_after(resp: httpx.Response) -> float | None:
     try:
         return float(resp.headers.get("retry-after", ""))
     except ValueError:
-        return None
+        pass
+    try:  # Google reports the wait in the error body: {"details": [{"retryDelay": "17s"}]}
+        for detail in resp.json()["error"].get("details", []):
+            if "retryDelay" in detail:
+                return float(detail["retryDelay"].rstrip("s"))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return None
 
 
 def _raise_for_http(resp: httpx.Response) -> None:
@@ -130,7 +136,7 @@ class GeminiProvider(Provider):
         body = {
             "systemInstruction": {"parts": [{"text": req.system}]},
             "contents": [{"role": "user", "parts": [{"text": (req.context + "\n\n" if req.context else "") + req.task}]}],
-            "generationConfig": {"temperature": req.temperature, "maxOutputTokens": req.max_output_tokens, "responseMimeType": "application/json"},
+            "generationConfig": {"temperature": req.temperature, "maxOutputTokens": max(req.max_output_tokens, OUTPUT_HEADROOM), "responseMimeType": "application/json"},
         }
         try:
             resp = self.client.post(f"{self.base}/v1beta/models/{model}:generateContent", json=body, headers={"x-goog-api-key": self.settings.llm_api_key})
@@ -146,7 +152,7 @@ class GeminiProvider(Provider):
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMMalformedResponse("response had no candidate text (blocked or empty)") from exc
         if cand.get("finishReason") == "MAX_TOKENS":
-            raise LLMMalformedResponse("output was truncated at the token limit")
+            raise LLMMalformedResponse(f"{req.schema_name}: output was truncated at the token limit")
         usage = payload.get("usageMetadata", {})
         return LLMResponse(
             _parse_json_text(text), int(usage.get("promptTokenCount", 0)), int(usage.get("candidatesTokenCount", 0)), model,
@@ -173,7 +179,7 @@ class OpenAICompatProvider(Provider):
             "model": model,
             "messages": [{"role": "system", "content": req.system}, {"role": "user", "content": user}],
             "temperature": req.temperature,
-            "max_tokens": req.max_output_tokens,
+            "max_tokens": max(req.max_output_tokens, OUTPUT_HEADROOM),
             "response_format": {"type": "json_object"},
         }
         try:
@@ -193,7 +199,7 @@ class OpenAICompatProvider(Provider):
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMMalformedResponse("response had no message content") from exc
         if choice.get("finish_reason") == "length":
-            raise LLMMalformedResponse("output was truncated at the token limit")
+            raise LLMMalformedResponse(f"{req.schema_name}: output was truncated at the token limit")
         usage = payload.get("usage", {})
         return LLMResponse(_parse_json_text(text), int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)), model)
 

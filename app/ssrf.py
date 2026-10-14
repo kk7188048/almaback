@@ -1,13 +1,6 @@
-"""SSRF-safe outbound HTTP.
-
-Every URL that originates from a student (live app URL, webhook URL, Drive/GitHub links)
-goes through here. Defences:
-  * scheme allow-list (http/https), no userinfo in the URL
-  * host resolved ONCE; every resolved address must be globally routable
-  * the connection is pinned to the validated IP (TLS SNI/cert check still uses the hostname)
-    so a DNS-rebinding answer between "check" and "connect" cannot redirect us
-  * redirects are followed manually and re-validated at each hop
-  * response bytes are capped while streaming
+"""SSRF-safe outbound HTTP for every URL a student controls (live app, webhook, Drive, GitHub).
+The host is resolved once and each address must be public; the connection is pinned to that IP (defeats DNS rebinding);
+redirects are re-validated per hop and responses are size-capped.
 """
 
 import ipaddress

@@ -33,7 +33,7 @@ def _snapshot(job_id: str) -> dict | None:
 @router.get("/jobs/{job_id}/events")
 async def job_events(job_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Server-sent events. Clients that cannot hold a stream just poll GET /jobs/{id}."""
-    get_job(db, user, job_id)  # authorization, once
+    get_job(db, user, job_id)
     db.close()
 
     async def stream():

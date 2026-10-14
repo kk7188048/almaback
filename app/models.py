@@ -26,7 +26,7 @@ _settings = get_settings()
 if _settings.use_pgvector:
     from pgvector.sqlalchemy import Vector
 
-    VectorType = JSON().with_variant(Vector(_settings.embedding_dim), "postgresql")
+    VectorType = Vector(_settings.embedding_dim)
 else:
     VectorType = JSON
 

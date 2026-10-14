@@ -6,6 +6,7 @@ It exercises exactly the production process topology (api / scheduler / worker) 
 Pass DATABASE_URL=postgresql+psycopg://... to run the same flow against Postgres.
 """
 
+import ast
 import io
 import os
 import signal
@@ -58,7 +59,7 @@ def main() -> int:
         time.sleep(1.5)
         subprocess.run([sys.executable, "-m", "app.cli", "create-tables"], cwd=ROOT, env=env, check=True, capture_output=True)
         seeded = subprocess.run([sys.executable, "-m", "app.cli", "seed-demo"], cwd=ROOT, env=env, check=True, capture_output=True, text=True).stdout
-        assignment_id = eval(seeded.strip())["assignment_id"]  # noqa: S307  (our own CLI output)
+        assignment_id = ast.literal_eval(seeded.strip())["assignment_id"]
         spawn("api", sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(PORT_API))
         spawn("scheduler", sys.executable, "-m", "app.scheduler")
         spawn("worker", sys.executable, "-m", "celery", "-A", "app.queueing:celery_app", "worker", "-Q", "evaluations", "-c", "1", "--loglevel=INFO", "--pool=solo", "--without-gossip", "--without-mingle")

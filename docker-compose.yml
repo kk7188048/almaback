@@ -6,7 +6,6 @@
 
 x-app: &app
   image: ${IMAGE:-almabetter-eval:local}
-  build: .
   env_file: .env
   environment: &app-env
     DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-eval}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-eval}
@@ -53,6 +52,7 @@ services:
 
   api:
     <<: *app
+    build: .
     depends_on:
       migrate: {condition: service_completed_successfully}
       db: {condition: service_healthy}

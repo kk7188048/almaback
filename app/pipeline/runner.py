@@ -1,10 +1,5 @@
-"""Job execution with at-least-once delivery made safe:
-
-  claim      atomic conditional UPDATE (QUEUED, or RUNNING with an expired lease) -> duplicate deliveries are no-ops
-  lease      held while running, extended by a heartbeat thread; a crashed worker's lease simply expires
-  attempts   every try is a new append-only EvaluationAttempt row; history is never rewritten
-  checkpoint context pack, understanding, analyses and every criterion are stored, so a retry resumes
-  outcomes   success / needs_review / retry-with-backoff / deferred (budget) / failed - all through guarded updates
+"""Job execution: atomic claim, lease with heartbeat, append-only attempts, stage checkpoints, and a guarded
+state transition for every outcome (success, review, retry, deferral, failure).
 """
 
 import logging
@@ -35,7 +30,7 @@ from app.pipeline.evaluate import Evaluator
 from app.pipeline.ingest.run import ingest_submission
 from app.pipeline.llm import prompts
 from app.pipeline.llm.base import (
-    BudgetExceeded, CircuitBreaker, LLMAuthError, LLMClient, LLMError, Provider, UsageTracker,
+    BudgetExceeded, CircuitBreaker, LLMAuthError, LLMClient, LLMError, Provider, RequestPacer, UsageTracker,
 )
 from app.pipeline.llm.providers import build_provider
 from app.pipeline.retrieval import retrieve, store_chunks
@@ -46,17 +41,19 @@ log = logging.getLogger(__name__)
 DEFERRED = "deferred_budget"
 _breaker: CircuitBreaker | None = None
 _semaphore: threading.BoundedSemaphore | None = None
+_pacer: RequestPacer | None = None
 _singleton_lock = threading.Lock()
 
 
-def _shared_llm_controls(s: Settings) -> tuple[CircuitBreaker, threading.BoundedSemaphore]:
-    global _breaker, _semaphore
+def _shared_llm_controls(s: Settings) -> tuple[CircuitBreaker, threading.BoundedSemaphore, RequestPacer]:
+    global _breaker, _semaphore, _pacer
     with _singleton_lock:
         if _breaker is None:
             _breaker = CircuitBreaker(s.llm_breaker_threshold, s.llm_breaker_cooldown_s)
             _semaphore = threading.BoundedSemaphore(s.llm_max_concurrency)
-        assert _semaphore is not None
-        return _breaker, _semaphore
+            _pacer = RequestPacer(s.llm_requests_per_minute)
+        assert _semaphore is not None and _pacer is not None
+        return _breaker, _semaphore, _pacer
 
 
 @dataclass
@@ -235,8 +232,8 @@ def _execute(claim: Claim, deps: RunnerDeps, hb: Heartbeat, usage: UsageTracker,
     storage = deps.storage or get_storage()
     ckpt = Checkpoints(storage, claim.job_id)
     provider = deps.provider or build_provider(s)
-    breaker, semaphore = _shared_llm_controls(s)
-    llm = LLMClient(provider, s, usage, breaker=breaker, semaphore=semaphore, **deps.llm_kwargs)
+    breaker, semaphore, pacer = _shared_llm_controls(s)
+    llm = LLMClient(provider, s, usage, breaker=breaker, semaphore=semaphore, pacer=pacer, **deps.llm_kwargs)
     boundary = prompts.job_boundary(claim.job_id, s.jwt_secret)
     _guard_daily_budget(s)
 
@@ -395,7 +392,7 @@ def _run_job(job_id: str, deps: RunnerDeps) -> str:
         log.error("LLM credentials rejected")
         return _safe_persist(_persist_failure, claim, s, usage, code="llm_misconfigured", message="the evaluation service is temporarily unavailable", retryable=True)
     except LLMError as llm_err:
-        log.warning("LLM failure: %s", type(llm_err).__name__)
+        log.warning("LLM failure: %s: %s", type(llm_err).__name__, llm_err)
         return _safe_persist(_persist_failure, claim, s, usage, code=f"llm_{type(llm_err).__name__.lower()}", message="the AI service was unavailable; the evaluation will be retried", retryable=True)
     except Exception:
         log.exception("unexpected error while processing job")

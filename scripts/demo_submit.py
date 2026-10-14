@@ -4,10 +4,9 @@
     python scripts/demo_submit.py --zip my_project.zip
     python scripts/demo_submit.py --github https://github.com/owner/repo
     python scripts/demo_submit.py --live-url https://example.com
-Options can be combined. Needs the stack from `python scripts/dev.py`."""
+Options can be combined. Defaults to the Docker stack on http://localhost; use --base for scripts/dev.py (http://127.0.0.1:8000)."""
 
 import argparse
-import ast
 import io
 import sys
 import time
@@ -36,15 +35,16 @@ def sample_zip() -> bytes:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", default="http://127.0.0.1:8000")
+    ap.add_argument("--base", default="http://localhost")
     ap.add_argument("--zip")
     ap.add_argument("--github")
     ap.add_argument("--live-url")
     args = ap.parse_args()
-    seed = ast.literal_eval((Path(__file__).resolve().parent.parent / ".devrun" / "seed.txt").read_text())
     c = httpx.Client(base_url=args.base, timeout=60)
     tok = c.post("/api/v1/auth/login", json={"email": "student@example.com", "password": "change-me-please-3"}).json()["access_token"]
     auth = {"Authorization": f"Bearer {tok}"}
+    course = c.get("/api/v1/courses", headers=auth).json()[0]
+    assignment_id = c.get(f"/api/v1/courses/{course['id']}/assignments", headers=auth).json()[0]["id"]
 
     sources, uploads = [], {}
     if args.zip:
@@ -60,7 +60,7 @@ def main() -> int:
         sources.append({"type": "zip", "filename": "notes-api.zip", "size_bytes": len(data)})
         uploads["notes-api.zip"] = data
 
-    r = c.post("/api/v1/submissions", json={"assignment_id": seed["assignment_id"], "sources": sources}, headers={**auth, "Idempotency-Key": uuid.uuid4().hex})
+    r = c.post("/api/v1/submissions", json={"assignment_id": assignment_id, "sources": sources}, headers={**auth, "Idempotency-Key": uuid.uuid4().hex})
     if r.status_code != 202:
         print("submit failed:", r.status_code, r.text)
         return 1

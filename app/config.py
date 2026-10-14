@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 
 from pydantic import Field
@@ -8,7 +9,7 @@ GB = 1024 * MB
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=os.environ.get("ENV_FILE", ".env"), extra="ignore")
 
     env: str = "dev"
     public_base_url: str = "http://localhost:8000"
@@ -43,7 +44,7 @@ class Settings(BaseSettings):
     # worker / reliability
     lease_ttl_s: int = 120
     heartbeat_interval_s: int = 30
-    max_attempts: int = 3
+    max_attempts: int = 5
     retry_backoff_base_s: int = 30
     relay_poll_interval_s: float = 1.0
     reaper_interval_s: int = 30
@@ -100,13 +101,14 @@ class Settings(BaseSettings):
     llm_model_standard: str = "mock-standard"
     llm_model_premium: str = "mock-premium"
     llm_max_concurrency: int = 4
+    llm_requests_per_minute: int = 0  # provider quota; 0 = unlimited
     llm_timeout_s: float = 90.0
     llm_max_retries: int = 4
     llm_backoff_base_s: float = 2.0
     llm_backoff_max_s: float = 60.0
     llm_max_repairs: int = 2
     llm_breaker_threshold: int = 6
-    llm_breaker_cooldown_s: float = 60.0
+    llm_breaker_cooldown_s: float = 30.0
     llm_prompt_cache: bool = False  # Bedrock cachePoint after the shared context
     price_in_per_mtok: dict[str, float] = Field(default_factory=dict)
     price_out_per_mtok: dict[str, float] = Field(default_factory=dict)

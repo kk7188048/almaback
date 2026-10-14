@@ -1,12 +1,5 @@
-"""LLM client: one provider-neutral request/response type and a resilient wrapper around any provider.
-
-Failure handling implemented here:
-  timeout / rate limit / unavailable -> exponential backoff with jitter (honours Retry-After), bounded retries
-  repeated failures                  -> circuit breaker (fail fast instead of hammering a dead provider)
-  malformed / invalid JSON           -> validate against a pydantic schema, then bounded repair-retry
-  token limit exceeded               -> LLMTokenLimit is raised so the caller can shrink the context and retry
-  provider quota                     -> process-wide concurrency semaphore
-  runaway cost                       -> per-attempt token budget
+"""Provider-neutral LLM types and a client that adds retries with backoff, a circuit breaker, request pacing,
+repair prompts for invalid output, and token budgets.
 """
 
 import logging
@@ -16,12 +9,14 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from app.config import Settings
 
 log = logging.getLogger(__name__)
+T = TypeVar("T", bound=BaseModel)
 
 
 class LLMError(Exception):
@@ -99,6 +94,26 @@ class Provider(ABC):
         """One attempt. Raise an LLMError subclass on failure."""
 
 
+class RequestPacer:
+    """Spaces call starts so a provider's requests-per-minute quota is never exceeded (0 disables pacing)."""
+
+    def __init__(self, requests_per_minute: int, clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep):
+        self.interval = 60.0 / requests_per_minute if requests_per_minute > 0 else 0.0
+        self.clock, self.sleep = clock, sleep
+        self._next = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self) -> None:
+        if not self.interval:
+            return
+        with self._lock:
+            now = self.clock()
+            start = max(now, self._next)
+            self._next = start + self.interval
+        if start > now:
+            self.sleep(start - now)
+
+
 class UsageTracker:
     def __init__(self, settings: Settings, token_budget: int):
         self.settings = settings
@@ -171,12 +186,14 @@ class LLMClient:
         *,
         breaker: CircuitBreaker | None = None,
         semaphore: threading.BoundedSemaphore | None = None,
+        pacer: RequestPacer | None = None,
         sleep: Callable[[float], None] = time.sleep,
         rng: Callable[[], float] = random.random,
     ):
         self.provider, self.settings, self.tracker = provider, settings, tracker
         self.breaker = breaker or CircuitBreaker(settings.llm_breaker_threshold, settings.llm_breaker_cooldown_s)
         self.semaphore = semaphore or threading.BoundedSemaphore(settings.llm_max_concurrency)
+        self.pacer = pacer or RequestPacer(settings.llm_requests_per_minute)
         self.sleep, self.rng = sleep, rng
 
     def _backoff(self, attempt: int, retry_after: float | None) -> float:
@@ -193,6 +210,7 @@ class LLMClient:
             retry_after = None
             try:
                 with self.semaphore:
+                    self.pacer.wait()
                     resp = self.provider.complete(req)
             except LLMRateLimited as exc:
                 last, retry_after = exc, exc.retry_after
@@ -204,7 +222,8 @@ class LLMClient:
                 self.breaker.success()
                 self.tracker.add(resp)
                 return resp
-            self.breaker.failure()
+            if not isinstance(last, LLMRateLimited):
+                self.breaker.failure()
             if attempt == self.settings.llm_max_retries:
                 break
             delay = self._backoff(attempt, retry_after)
@@ -213,7 +232,7 @@ class LLMClient:
         assert last is not None
         raise last
 
-    def call(self, req: LLMRequest, model_cls: type[BaseModel], validator: Callable[[BaseModel], None] | None = None) -> BaseModel:
+    def call(self, req: LLMRequest, model_cls: type[T], validator: Callable[[T], None] | None = None) -> T:
         task = req.task
         for repair in range(self.settings.llm_max_repairs + 1):
             resp = self._complete(replace(req, task=task))

@@ -54,7 +54,7 @@ def _summarise_files(llm: LLMClient, boundary: str, targets: list[FileInfo], set
         asked = {b["path"] for b in batch}
         try:
             out = llm.call(req, FileSummariesOut)
-            for item in out.items:  # type: ignore[attr-defined]
+            for item in out.items:
                 if item.path in asked and item.summary.strip():
                     summaries[item.path] = item.summary.strip()[:600]
         except LLMMalformedResponse:
@@ -82,7 +82,7 @@ def _reduce_by_directory(llm: LLMClient, boundary: str, file_summaries: dict[str
         joined = " ".join(s for _p, s in items)
         if len(items) >= 3 and len(joined) > 1200:
             try:
-                out[directory] = llm.call(prompts.dir_summary_request(boundary, directory, items), DirSummaryOut).summary.strip()  # type: ignore[attr-defined]
+                out[directory] = llm.call(prompts.dir_summary_request(boundary, directory, items), DirSummaryOut).summary.strip()
                 continue
             except LLMMalformedResponse:
                 pass
@@ -110,7 +110,6 @@ def build_context_pack(ingest: IngestResult, settings: Settings, llm: LLMClient,
     readme_file = min((f for f in analysable if f.abs.name.lower().startswith("readme")), key=lambda f: len(f.path), default=None)
     readme = {"path": readme_file.path, "text": secrets.redact(read_text(readme_file, settings.readme_tokens * 4))} if readme_file else None
 
-    # prompt-injection scan over everything a model might read
     injection_flags: list[dict] = []
     for f in analysable:
         if f.kind == "data" or f.size > settings.max_text_file_bytes:
@@ -125,13 +124,11 @@ def build_context_pack(ingest: IngestResult, settings: Settings, llm: LLMClient,
         if probe and (snippet := find_injection(probe.get("text_excerpt", ""))):
             injection_flags.append({"path": outcome.prefix + "/live_url", "snippet": secrets.redact(snippet)})
 
-    # map-reduce summaries: all docs + the highest-ranked code files
     top_code = [f for f in analysable if f.kind == "code" and f.path in set(ranking[: settings.summarize_top_code_files])]
     docs = [f for f in analysable if f.kind == "doc"][:60]
     file_summaries = _summarise_files(llm, boundary, docs + top_code, settings)
     dir_summaries = _reduce_by_directory(llm, boundary, file_summaries)
 
-    # chunk + embed (docs first, then code in rank order) for per-criterion retrieval
     embedder = HashEmbedder(settings.embedding_dim)
     order = {p: i for i, p in enumerate(ranking)}
     embed_files = sorted(
