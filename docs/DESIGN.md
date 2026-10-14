@@ -121,10 +121,13 @@ A student submits a project (GitHub repo / ZIP / PDF / Drive / video / live URL)
 POST /submissions ─┐  (SYNC — fast, <300ms)
                    ├─▶ 1. AuthN/AuthZ + validate (Pydantic, size/type caps)
                    ├─▶ 2. Create submission + evaluation_job rows
-                   ├─▶ 3. Write queue message to OUTBOX table ── all in ONE DB transaction
-                   └─▶ 4. Return 202 Accepted + { job_id, status_url, upload_url (presigned) }
+                   ├─▶ 3a. Sources with no upload (GitHub/Drive/URL): write OUTBOX row in the SAME txn → job is QUEUED
+                   ├─▶ 3b. Sources with uploads (ZIP/PDF/video): job starts as AWAITING_UPLOAD
+                   └─▶ 4. Return 202 Accepted + { job_id, status_url, presigned upload instructions (if any) }
 
-  [client uploads large files DIRECTLY to S3 via presigned/multipart URL — bypasses the API]
+  [client uploads files DIRECTLY to S3 via presigned URL — bypasses the API entirely]
+
+POST /submissions/{id}/uploads/complete ─▶ verify objects landed (size + magic bytes) → write OUTBOX → QUEUED
 
 Outbox relay ─────▶ 5. Publish job to QUEUE (at-least-once)        (ASYNC from here down)
                          │
@@ -138,7 +141,7 @@ Worker (pull) ───────────┼─▶ 6. INGEST: fetch repo/z
                          ├─▶ 10. PERSIST results (new attempt row, append-only)
                          └─▶ 11. NOTIFY: SSE/webhook/poll; route low-confidence → human review
 
-  Each stage checkpoints its output to DB/S3 keyed by attempt_id → a retry resumes, never re-runs LLM calls.
+  Each stage checkpoints its output to DB/S3 keyed by job_id → a new retry attempt inherits prior checkpoints and resumes, never re-runs completed LLM calls.
 ```
 
 ### 2.2 Sync vs async
@@ -177,19 +180,26 @@ Body:
   ]
 }
 
-201/202 Response:
+202 Response:
 {
   "submission_id": "sub_456",
   "job_id": "job_789",
-  "status": "QUEUED",
+  "status": "AWAITING_UPLOAD",          ← QUEUED immediately if no uploads needed (GitHub/Drive/URL only)
   "status_url": "/api/v1/jobs/job_789",
   "uploads": [
     { "filename": "project.zip",
-      "upload_url": "https://s3...&X-Amz-Signature=...",   ← presigned PUT (multipart for >100MB)
+      "method": "POST",                 ← presigned POST with content-length-range policy (S3 enforces the size cap)
+      "url": "https://s3...",
+      "fields": { ... },                ← signed form fields
       "expires_in": 900 }
-  ]
+  ],
+  "complete_url": "/api/v1/submissions/sub_456/uploads/complete"
 }
 ```
+**Upload strategy:** single-file uploads use **presigned POST** with a `content-length-range` condition so S3 itself rejects oversized payloads (a presigned PUT cannot enforce this). Files >100 MB use **presigned multipart part URLs**; the size is verified server-side at completion. Cloudflare R2 and other S3-compatibles that lack POST policies fall back to presigned PUT with a signed `Content-Length` header.
+
+After the client uploads, it calls `POST /submissions/{id}/uploads/complete` — the server verifies each object's size and magic bytes, then writes the outbox row and transitions the job to `QUEUED`.
+
 **Validation:** assignment exists and is open; caller enrolled in the course; ≤ N sources; per-type size caps; URL scheme/host allowlist for `github`/`live_url` (SSRF). **Auth:** student role, enrolled.
 
 ### 3.2 Get job status (poll)
@@ -440,7 +450,7 @@ Model-tiering (**Haiku** for extraction/summaries → **Sonnet** for heavy analy
 | Invalid GitHub repo | Clone pre-check (exists, size, reachable); fail fast with reason. |
 | Large repo (1 GB+) | Depth-1 clone, byte cap, timeout; extraction filter discards non-signal; reject over hard cap. |
 | Unsupported file | Skip with a logged warning; never block the whole submission. |
-| Worker crash | At-least-once redelivery + **stage checkpointing** → resume, don't re-run LLM. |
+| Worker crash | At-least-once redelivery + **stage checkpointing** (keyed by job_id, so a new attempt inherits completed stages from the prior attempt) → resume, don't re-run LLM. |
 | Network failure | Retries with backoff; idempotent fetch steps. |
 
 ### 6.3 Idempotency (POST /evaluate called 5×)
