@@ -1,8 +1,12 @@
 # AI-Powered Project Evaluation Platform — Backend Design
 
+*(Apologies for the delayed submission — I was admitted to the hospital.)*
+
 **Author:** Krishna Kumar
+**Email:** krishna.k.official3@gmail.com
 **Assignment:** Design an AI-Powered Project Evaluation Platform (AlmaBetter)
 **Date:** 2026-10-14
+**GitHub (PoC):** [https://github.com/kk7188048/almaback](https://github.com/kk7188048/almaback)
 
 ---
 
