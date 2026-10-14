@@ -646,6 +646,22 @@ def test_signals_lint_complexity_deps_and_secrets(tmp_path):
     assert "AKIA" + "IOSFODNN7EXAMPLE" not in json.dumps(sig) and sig["todo_fixme_count"] == 1 and sig["tests_executed"] is False
 
 
+def test_lint_signal_ignores_line_length_and_test_asserts_but_keeps_real_security_findings(tmp_path):
+    from app.pipeline.context.filters import walk_project as wp
+
+    build_tree(tmp_path / "s", {
+        "app.py": "import subprocess\n\nx = '" + "a" * 150 + "'\n\n\ndef run(cmd):\n    subprocess.call(cmd, shell=True)\n",
+        "tests/test_a.py": "def test_x():\n    assert 1 == 1\n",
+    })
+    walk = wp(tmp_path, 100_000, 100)
+    sig = signals.compute_signals(tmp_path, walk.analyzable, walk.excluded, get_settings(), [])
+    if not sig["lint"]["available"]:
+        pytest.skip("ruff not installed")
+    codes = dict(sig["lint"]["top_rules"])
+    assert "E501" not in codes and "S101" not in codes  # long line + test assert are not reported
+    assert any(c.startswith("S") for c in codes)  # shell=True in app code is
+
+
 def test_secret_redaction_and_injection_detection():
     text = "key=AKIA" + "IOSFODNN7EXAMPLE tok=ghp_" + "b" * 36 + "\n-----BEGIN RSA PRIVATE KEY-----\napi_key = 'abcdefghijklmnopqrstuvwx'"
     red = secrets.redact(text)

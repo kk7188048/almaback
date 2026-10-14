@@ -77,20 +77,33 @@ def detect_frameworks(deps: dict[str, list[str]]) -> list[str]:
     return sorted({label for hint, label in FRAMEWORK_HINTS.items() if hint in names})
 
 
-def lint_python(files: list[Path], root: Path) -> dict:
-    ruff = _which("ruff")
-    if ruff is None or not files:
-        return {"available": ruff is not None, "files": 0}
+def _ruff_json(ruff: str, files: list[Path], select: str, ignore: str = "") -> list[dict]:
     findings: list[dict] = []
     for i in range(0, min(len(files), MAX_LINT_FILES), 500):
         batch = [str(p) for p in files[i:i + 500]]
-        proc = _run([ruff, "check", "--isolated", "--no-cache", "--exit-zero", "--output-format", "json", "--select", "E,F,W,B,S,C90", *batch], 180)
+        cmd = [ruff, "check", "--isolated", "--no-cache", "--exit-zero", "--output-format", "json", "--select", select]
+        if ignore:
+            cmd += ["--ignore", ignore]
+        proc = _run([*cmd, *batch], 180)
         if proc is None or not proc.stdout.strip():
             continue
         try:
             findings.extend(json.loads(proc.stdout))
         except ValueError:
             continue
+    return findings
+
+
+def lint_python(files: list[Path], test_files: set[Path] | None = None) -> dict:
+    """Style/bug rules on every file; security (bandit-style) rules only on non-test code, because `assert`,
+    hard-coded fixtures and subprocess calls in tests are normal. E501 is ignored: line length is a project convention
+    (ruff's default of 88 would flag most real-world code)."""
+    ruff = _which("ruff")
+    if ruff is None or not files:
+        return {"available": ruff is not None, "files": 0}
+    test_files = test_files or set()
+    findings = _ruff_json(ruff, files, "E,F,W,B,C90", ignore="E501")
+    findings += _ruff_json(ruff, [f for f in files if f not in test_files], "S")
     codes = Counter(f.get("code") or "syntax" for f in findings)
     return {
         "available": True,
@@ -101,6 +114,7 @@ def lint_python(files: list[Path], root: Path) -> dict:
         "top_rules": codes.most_common(10),
         "security_findings": sum(n for c, n in codes.items() if str(c).startswith("S")),
         "syntax_errors": codes.get("syntax", 0) + codes.get("E999", 0),
+        "notes": "E501 ignored; security rules skipped for test files",
     }
 
 
@@ -181,6 +195,7 @@ def compute_signals(root: Path, files: list[FileInfo], excluded: Counter, settin
     paths_lower = [f.path.lower() for f in files]
     deps = parse_dependencies(files)
     py_files = [f.abs for f in code if f.lang == "python"]
+    py_tests = {f.abs for f in code if f.lang == "python" and f.kind == "test"}
     readme = next((f for f in files if f.abs.name.lower().startswith("readme")), None)
 
     secret_findings: list[dict] = []
@@ -220,7 +235,7 @@ def compute_signals(root: Path, files: list[FileInfo], excluded: Counter, settin
         "dependencies": {k: v[:60] for k, v in deps.items()},
         "frameworks": detect_frameworks(deps),
         "todo_fixme_count": todo,
-        "lint": lint_python(py_files, root),
+        "lint": lint_python(py_files, py_tests),
         "complexity": complexity_python(py_files, settings.max_parse_file_bytes) if py_files else {},
         "semgrep": run_semgrep(root, settings),
         "dependency_audit": run_pip_audit(requirements, settings) if requirements else {"available": False},
