@@ -1,0 +1,60 @@
+name: deploy
+
+# Build -> push to ECR -> roll out on the EC2 host via SSM -> health-check -> automatic rollback.
+# Requires (one-time): an IAM role trusted for GitHub OIDC, an ECR repo, and an EC2 instance with the SSM agent,
+# Docker, this repo's docker-compose.yml + .env in /opt/eval, and the tag Name=eval-prod.
+# The "production" environment should be configured with required reviewers (manual approval gate).
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: almabetter-eval
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}   # OIDC: no long-lived AWS keys stored in GitHub
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push (tagged with the commit SHA; never :latest)
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+      - name: Roll out via SSM, verify, roll back on failure
+        run: |
+          aws ssm send-command \
+            --document-name AWS-RunShellScript \
+            --targets "Key=tag:Name,Values=eval-prod" \
+            --comment "deploy ${{ github.sha }}" \
+            --timeout-seconds 600 \
+            --parameters 'commands=[
+              "set -e",
+              "cd /opt/eval",
+              "PREVIOUS=$(grep ^IMAGE= .deploy-state 2>/dev/null | cut -d= -f2- || true)",
+              "aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.ecr.outputs.registry }}",
+              "export IMAGE=${{ env.IMAGE }}",
+              "docker compose pull api worker scheduler migrate",
+              "docker compose up -d --remove-orphans",
+              "for i in $(seq 1 30); do curl -fsS http://localhost/healthz >/dev/null && docker compose exec -T api python -c \"import urllib.request;urllib.request.urlopen(\\\"http://localhost:8000/readyz\\\",timeout=3)\" && OK=1 && break; sleep 5; done",
+              "if [ -z \"$OK\" ]; then echo deploy failed, rolling back; [ -n \"$PREVIOUS\" ] && IMAGE=$PREVIOUS docker compose up -d; exit 1; fi",
+              "echo IMAGE=$IMAGE > .deploy-state"
+            ]' \
+            --query 'Command.CommandId' --output text | tee command-id.txt
+          aws ssm wait command-executed --command-id "$(cat command-id.txt)" --instance-id "$(aws ec2 describe-instances --filters Name=tag:Name,Values=eval-prod Name=instance-state-name,Values=running --query 'Reservations[0].Instances[0].InstanceId' --output text)"

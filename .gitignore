@@ -1,0 +1,34 @@
+# environments / secrets
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# local runtime data
+.devrun/
+.storage/
+*.db
+*.sqlite3
+celerybeat-schedule*
+
+# deployment secrets / certs
+nginx/certs/*
+!nginx/certs/.gitkeep
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

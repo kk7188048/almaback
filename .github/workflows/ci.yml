@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        db: [sqlite, postgres]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env: {POSTGRES_PASSWORD: postgres, POSTGRES_DB: evaltest}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check app tests --select F,E9
+      - name: Tests (SQLite)
+        if: matrix.db == 'sqlite'
+        run: pytest
+      - name: Tests (PostgreSQL + pgvector, real migrations)
+        if: matrix.db == 'postgres'
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/evaltest
+          USE_PGVECTOR: "true"
+        run: |
+          alembic upgrade head
+          alembic check
+          pytest
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: almabetter-eval:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Scan image (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: almabetter-eval:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

@@ -1,0 +1,123 @@
+# Single-host deployment (EC2 t3.micro free tier is enough for 30 submissions/day).
+#   docker compose up -d --build                         core stack, local-disk storage
+#   docker compose --profile s3 up -d                    + MinIO as a local S3 (dev); use real S3 in production via .env
+#   docker compose --profile clamav up -d                + ClamAV malware scanning (needs ~1.5 GB RAM; not for a micro instance)
+# Every service reads the same .env (see .env.example).
+
+x-app: &app
+  image: ${IMAGE:-almabetter-eval:local}
+  build: .
+  env_file: .env
+  environment: &app-env
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-eval}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-eval}
+    REDIS_URL: redis://redis:6379/0
+    LOCAL_STORAGE_DIR: /data/storage
+  restart: unless-stopped
+  depends_on:
+    db: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  volumes:
+    - storage:/data/storage
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eval}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-eval}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eval} -d ${POSTGRES_DB:-eval}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # AOF so queued job messages survive a restart; jobs themselves are also recoverable from Postgres (outbox + reaper)
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    <<: *app
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    <<: *app
+    command: ["celery", "-A", "app.queueing:celery_app", "worker", "-Q", "evaluations", "-c", "${WORKER_CONCURRENCY:-1}", "--loglevel=INFO", "--without-gossip", "--without-mingle"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    stop_grace_period: 60s
+    # untrusted code is only ever analysed statically, but keep the worker boxed in anyway.
+    # Scratch space is a disk-backed volume (a tmpfs would be RAM and OOM a 1 GB instance on a large repo).
+    volumes:
+      - storage:/data/storage
+      - scratch:/tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  scheduler:
+    <<: *app
+    command: ["python", "-m", "app.scheduler"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+
+  minio:
+    profiles: [s3]
+    image: minio/minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [miniodata:/data]
+
+  clamav:
+    profiles: [clamav]
+    image: clamav/clamav:stable
+    restart: unless-stopped
+    volumes: [clamdata:/var/lib/clamav]
+
+volumes:
+  pgdata:
+  redisdata:
+  storage:
+  scratch:
+  miniodata:
+  clamdata:

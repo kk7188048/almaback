@@ -1,0 +1,14 @@
+.venv
+.git
+.github
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.storage
+*.db
+.env
+tests
+docs
+nginx
+.devrun
